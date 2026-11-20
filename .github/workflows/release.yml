@@ -116,12 +116,13 @@ jobs:
           mkdir -p "$dest"
           tar -C "$dest" -xzf "$RUNNER_TEMP/$ASSET"
           export XSCHEM_SHAREDIR="$dest/share/xschem"
-          out="$("$dest/bin/xschem" --version 2>&1 | head -n 1)"
+          # Search all of the output, not its first line: on a fresh $HOME the
+          # first launch prints "Created ~/.xschem dir with template xschemrc"
+          # before the version line (seen on the first run of this workflow).
+          out="$("$dest/bin/xschem" --version 2>&1)"
           echo "$out"
-          case "$out" in
-            *"V$XSCHEM_TAG"*) ;;
-            *) echo "::error::expected xschem V$XSCHEM_TAG, got: $out"; exit 1;;
-          esac
+          grep -qF "V$XSCHEM_TAG" <<<"$out" \
+            || { echo "::error::expected xschem V$XSCHEM_TAG in --version output"; exit 1; }
           sch="$(find "$dest/share/xschem" -name '*.sch' -path '*examples*' | sort | head -n 1)"
           [[ -n "$sch" ]] || { echo "::error::no example schematic shipped"; exit 1; }
           mkdir -p "$RUNNER_TEMP/netlist"
