@@ -1,0 +1,176 @@
+name: Build and publish an xschem release
+
+# 2AMLogic's fork of StefanSchippers/xschem (operator ruling 2026-11-19,
+# attended /fleet:decide round 20261119-r18; fleet rule 2AMLogic/2am#7275,
+# install route 2AMLogic/klayout-tools#6219). Chip CI installs the fleet's
+# xschem CREDENTIAL-FREE from a release here.
+#
+# Manual only (`workflow_dispatch`). Give it an upstream tag (for example
+# `3.4.7`) and a build number. It checks that tag out from THIS fork, builds
+# it for Ubuntu 24.04 x86_64, and publishes release `<tag>-2am.<build>` whose
+# git tag points at the upstream commit, so GitHub's source archives for the
+# release are exactly the source the binary was built from (GPL: the
+# corresponding source sits beside the binary). Upstream's LICENSE is attached
+# too.
+#
+# The fleet's version of record stays in 2AMLogic/klayout-tools
+# `docker/eda-sim/pdk-versions.json` `tools.xschem` (tag, commit, asset URL,
+# sha256); this workflow prints the sha256 to record there.
+#
+# To follow a new upstream version: sync the fork (`gh repo sync
+# 2AMLogic/xschem --branch master`), push upstream's new tag to this fork,
+# then dispatch with that tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream xschem tag to build (must exist in this fork)"
+        required: true
+      build:
+        description: "Build number for the release tag <tag>-2am.<build>"
+        required: true
+        default: "1"
+
+permissions:
+  contents: write # create the release + upload the assets
+
+concurrency:
+  group: xschem-release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    name: Build and publish xschem ${{ inputs.tag }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      XSCHEM_TAG: ${{ inputs.tag }}
+      RELEASE_TAG: ${{ inputs.tag }}-2am.${{ inputs.build }}
+      ASSET: xschem-${{ inputs.tag }}-noble-x86_64.tar.gz
+    steps:
+      - name: Validate inputs
+        run: |
+          set -euo pipefail
+          [[ "$XSCHEM_TAG" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+            || { echo "::error::tag '$XSCHEM_TAG' is not an upstream X.Y.Z tag"; exit 1; }
+          [[ "${{ inputs.build }}" =~ ^[0-9]+$ ]] \
+            || { echo "::error::build must be a number"; exit 1; }
+
+      - name: Check out the upstream tag
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          path: src
+
+      - name: Resolve the commit
+        id: src
+        run: |
+          set -euo pipefail
+          commit="$(git -C src rev-parse HEAD)"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+          echo "xschem $XSCHEM_TAG resolves to $commit"
+
+      - name: Install build dependencies
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            build-essential bison flex libcairo2-dev libx11-dev libxcb1-dev \
+            libxpm-dev libxrender-dev tcl-dev tk-dev
+
+      - name: Build
+        working-directory: src
+        run: |
+          set -euo pipefail
+          # Same prefix as klayout-tools' eda-sim image. klayout-tools'
+          # install-xschem.sh wraps the binary with XSCHEM_SHAREDIR, so the
+          # unpacked tree is relocatable.
+          ./configure --prefix=/opt/eda/xschem
+          make -j"$(nproc)"
+          sudo make install
+
+      - name: Package the install prefix
+        id: pack
+        env:
+          COMMIT: ${{ steps.src.outputs.commit }}
+        run: |
+          set -euo pipefail
+          printf 'xschem %s (%s)\nbuilt from %s by %s run %s on ubuntu-24.04\n' \
+            "$XSCHEM_TAG" "$COMMIT" "$GITHUB_REPOSITORY" "$GITHUB_WORKFLOW" "$GITHUB_RUN_ID" \
+            | sudo tee /opt/eda/xschem/ARTIFACT-INFO > /dev/null
+          sudo cp src/LICENSE /opt/eda/xschem/LICENSE
+          tar -C /opt/eda/xschem -czf "$RUNNER_TEMP/$ASSET" .
+          sha256="$(sha256sum "$RUNNER_TEMP/$ASSET" | awk '{print $1}')"
+          echo "$sha256  $ASSET" > "$RUNNER_TEMP/$ASSET.sha256"
+          cp src/LICENSE "$RUNNER_TEMP/LICENSE"
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Smoke-test the packaged asset before publishing it
+        run: |
+          set -euo pipefail
+          # Unpack at a DIFFERENT prefix than the build prefix to prove it is
+          # relocatable, and take the real install away first.
+          sudo rm -rf /opt/eda/xschem
+          dest="$RUNNER_TEMP/relocated"
+          mkdir -p "$dest"
+          tar -C "$dest" -xzf "$RUNNER_TEMP/$ASSET"
+          export XSCHEM_SHAREDIR="$dest/share/xschem"
+          out="$("$dest/bin/xschem" --version 2>&1 | head -n 1)"
+          echo "$out"
+          case "$out" in
+            *"V$XSCHEM_TAG"*) ;;
+            *) echo "::error::expected xschem V$XSCHEM_TAG, got: $out"; exit 1;;
+          esac
+          sch="$(find "$dest/share/xschem" -name '*.sch' -path '*examples*' | sort | head -n 1)"
+          [[ -n "$sch" ]] || { echo "::error::no example schematic shipped"; exit 1; }
+          mkdir -p "$RUNNER_TEMP/netlist"
+          "$dest/bin/xschem" -q -n -x -o "$RUNNER_TEMP/netlist" "$sch"
+          [[ -n "$(ls -A "$RUNNER_TEMP/netlist")" ]] \
+            || { echo "::error::headless netlist produced no output"; exit 1; }
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COMMIT: ${{ steps.src.outputs.commit }}
+        run: |
+          set -euo pipefail
+          if gh release view "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::release $RELEASE_TAG already exists; dispatch with a new build number"
+            exit 1
+          fi
+          notes="xschem ${XSCHEM_TAG} (upstream commit ${COMMIT}), built unmodified for Ubuntu 24.04 x86_64 by 2AMLogic's fork of StefanSchippers/xschem. xschem is free software under the licence in the attached LICENSE; the source archives of this release are the corresponding source. Install with 2AMLogic/klayout-tools scripts/install-xschem.sh, which verifies the sha256."
+          gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
+            "$RUNNER_TEMP/$ASSET" "$RUNNER_TEMP/$ASSET.sha256" "$RUNNER_TEMP/LICENSE" \
+            --target "$COMMIT" \
+            --title "xschem ${XSCHEM_TAG} (2AMLogic build ${{ inputs.build }})" \
+            --notes "$notes"
+
+      - name: Verify the public asset downloads with no token
+        env:
+          EXPECTED: ${{ steps.pack.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          unset GH_TOKEN GITHUB_TOKEN
+          url="https://github.com/${GITHUB_REPOSITORY}/releases/download/${RELEASE_TAG}/${ASSET}"
+          curl -fL --retry 3 --retry-all-errors -o "$RUNNER_TEMP/dl.tar.gz" "$url"
+          actual="$(sha256sum "$RUNNER_TEMP/dl.tar.gz" | awk '{print $1}')"
+          [[ "$actual" == "$EXPECTED" ]] \
+            || { echo "::error::public download sha256 $actual != uploaded $EXPECTED"; exit 1; }
+
+      - name: Report what to record in klayout-tools
+        env:
+          SHA256: ${{ steps.pack.outputs.sha256 }}
+          COMMIT: ${{ steps.src.outputs.commit }}
+        run: |
+          {
+            echo "### xschem ${XSCHEM_TAG} published as ${RELEASE_TAG}"
+            echo
+            echo "Record in 2AMLogic/klayout-tools \`docker/eda-sim/pdk-versions.json\` \`tools.xschem\`:"
+            echo
+            echo '```'
+            echo "\"tag\": \"${XSCHEM_TAG}\", \"commit\": \"${COMMIT}\","
+            echo "\"release_repo\": \"${GITHUB_REPOSITORY}\", \"release_tag\": \"${RELEASE_TAG}\","
+            echo "\"asset\": \"${ASSET}\", \"sha256\": \"${SHA256}\""
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
