@@ -123,10 +123,14 @@ jobs:
           echo "$out"
           grep -qF "V$XSCHEM_TAG" <<<"$out" \
             || { echo "::error::expected xschem V$XSCHEM_TAG in --version output"; exit 1; }
-          # Examples install under share/doc/xschem/, not share/xschem/.
-          sch="$(find "$dest" -name '*.sch' -path '*examples*' | sort | head -n 1)"
+          # Examples install under share/doc/xschem/examples, not share/xschem.
+          # rcline.sch uses only symbols from the shipped devices/ library, so
+          # it netlists on the default library path (an index sheet such as
+          # 0_examples_top.sch references the other examples' symbols, which
+          # are not on that path, and xschem exits 10).
+          sch="$dest/share/doc/xschem/examples/rcline.sch"
+          [[ -f "$sch" ]] || { echo "::error::example $sch not shipped"; exit 1; }
           echo "netlisting $sch"
-          [[ -n "$sch" ]] || { echo "::error::no example schematic shipped"; exit 1; }
           mkdir -p "$RUNNER_TEMP/netlist"
           "$dest/bin/xschem" -q -n -x -o "$RUNNER_TEMP/netlist" "$sch"
           [[ -n "$(ls -A "$RUNNER_TEMP/netlist")" ]] \
