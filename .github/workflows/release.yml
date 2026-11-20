@@ -123,7 +123,9 @@ jobs:
           echo "$out"
           grep -qF "V$XSCHEM_TAG" <<<"$out" \
             || { echo "::error::expected xschem V$XSCHEM_TAG in --version output"; exit 1; }
-          sch="$(find "$dest/share/xschem" -name '*.sch' -path '*examples*' | sort | head -n 1)"
+          # Examples install under share/doc/xschem/, not share/xschem/.
+          sch="$(find "$dest" -name '*.sch' -path '*examples*' | sort | head -n 1)"
+          echo "netlisting $sch"
           [[ -n "$sch" ]] || { echo "::error::no example schematic shipped"; exit 1; }
           mkdir -p "$RUNNER_TEMP/netlist"
           "$dest/bin/xschem" -q -n -x -o "$RUNNER_TEMP/netlist" "$sch"
