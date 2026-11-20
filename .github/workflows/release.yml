@@ -83,9 +83,13 @@ jobs:
         working-directory: src
         run: |
           set -euo pipefail
-          # Same prefix as klayout-tools' eda-sim image. klayout-tools'
-          # install-xschem.sh wraps the binary with XSCHEM_SHAREDIR, so the
-          # unpacked tree is relocatable.
+          # Same prefix as klayout-tools' eda-sim image. The prefix is part of
+          # the contract: the tree is NOT relocatable. Outside its source tree
+          # xschem takes XSCHEM_LIBRARY_PATH from this compile-time prefix
+          # (src/xinit.c), so overriding XSCHEM_SHAREDIR moves its Tcl files
+          # but not its symbol library (run 44671676966: res.sym, lab_pin.sym
+          # "not found" from a relocated unpack). Consumers unpack at
+          # /opt/eda/xschem.
           ./configure --prefix=/opt/eda/xschem
           make -j"$(nproc)"
           sudo make install
@@ -109,13 +113,15 @@ jobs:
       - name: Smoke-test the packaged asset before publishing it
         run: |
           set -euo pipefail
-          # Unpack at a DIFFERENT prefix than the build prefix to prove it is
-          # relocatable, and take the real install away first.
+          # Test the tarball as a consumer installs it: remove the build's
+          # install, unpack the asset fresh at the contract prefix, and run it
+          # from there with a clean HOME and no XSCHEM_* overrides.
           sudo rm -rf /opt/eda/xschem
-          dest="$RUNNER_TEMP/relocated"
-          mkdir -p "$dest"
-          tar -C "$dest" -xzf "$RUNNER_TEMP/$ASSET"
-          export XSCHEM_SHAREDIR="$dest/share/xschem"
+          dest=/opt/eda/xschem
+          sudo mkdir -p "$dest"
+          sudo tar -C "$dest" -xzf "$RUNNER_TEMP/$ASSET"
+          export HOME="$RUNNER_TEMP/home"
+          mkdir -p "$HOME"
           # Search all of the output, not its first line: on a fresh $HOME the
           # first launch prints "Created ~/.xschem dir with template xschemrc"
           # before the version line (seen on the first run of this workflow).
@@ -146,7 +152,7 @@ jobs:
             echo "::error::release $RELEASE_TAG already exists; dispatch with a new build number"
             exit 1
           fi
-          notes="xschem ${XSCHEM_TAG} (upstream commit ${COMMIT}), built unmodified for Ubuntu 24.04 x86_64 by 2AMLogic's fork of StefanSchippers/xschem. xschem is free software under the licence in the attached LICENSE; the source archives of this release are the corresponding source. Install with 2AMLogic/klayout-tools scripts/install-xschem.sh, which verifies the sha256."
+          notes="xschem ${XSCHEM_TAG} (upstream commit ${COMMIT}), built unmodified for Ubuntu 24.04 x86_64 by 2AMLogic's fork of StefanSchippers/xschem. xschem is free software under the licence in the attached LICENSE; the source archives of this release are the corresponding source. Built with --prefix=/opt/eda/xschem and NOT relocatable: unpack it at /opt/eda/xschem (xschem's symbol library path is compiled in). Install with 2AMLogic/klayout-tools scripts/install-xschem.sh, which verifies the sha256."
           gh release create "$RELEASE_TAG" -R "$GITHUB_REPOSITORY" \
             "$RUNNER_TEMP/$ASSET" "$RUNNER_TEMP/$ASSET.sha256" "$RUNNER_TEMP/LICENSE" \
             --target "$COMMIT" \

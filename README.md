@@ -8,6 +8,8 @@ the schematic editor and netlister. It does two things:
    build of an upstream tag for Ubuntu 24.04 x86_64. Its git tag points at the
    upstream commit, so the release's source archives are the exact source the
    binary was built from. Upstream's `LICENSE` is attached to every release.
+   The build prefix is `/opt/eda/xschem` and the tree is **not relocatable**:
+   xschem compiles its symbol library path in, so unpack it at that prefix.
    Chip CI installs these binaries without credentials through
    2AMLogic/klayout-tools `scripts/install-xschem.sh`, which verifies the
    sha256. The fleet's xschem version of record is
